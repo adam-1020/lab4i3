@@ -229,6 +229,17 @@ public class Board {
     }
 
     /**
+     * Clears the board (sets all fields to 0).
+     */
+    public synchronized void clear() {
+        for (int r = 0; r < size; r++) {
+            for (int c = 0; c < size; c++) {
+                grid[r][c] = 0;
+            }
+        }
+    }
+
+    /**
      * Returns a human-readable textual representation of the board.
      *
      * @return board as formatted string

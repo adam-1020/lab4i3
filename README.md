@@ -14,7 +14,19 @@ src/
 
 │    ├─ ClientHandler.java
 
+│    ├─ SimpleBot.java
+
 │    └─ GameSession.java
+
+├─ database/
+
+│    ├─ GameEntity.java
+
+│    ├─ GameRepository.java
+
+│    ├─ MoveEntity.java
+
+│    └─ MoveRepository.java
 
 └─ common/
 
@@ -42,13 +54,25 @@ w src\main\java:
 
 nastęnie odpalamy serwer:
 
-java lab4.server.ServerMain
+`java lab4.server.ServerMain`
 
-i odpalamy dwóch klientów(graczy) używając SwingClientMain lub ClientMain:
+i odpalamy dwóch klientów(graczy) używając SwingClientMain lub ClientMain albo bota:
 
-java lab4.client.ClientMain
+`java lab4.client.ClientMain`
 
-java lab4.client.SwingClientMain
+`java lab4.client.SwingClientMain`
+
+Obsługa serwera:
+
+Komendy:
+
+exit - zamyka serwer
+
+replay ID - dziala tylko gdy nie trwa gra, odtwarza z bazy danych dana gre
+
+bot - dołącza bota do gry
+
+reset - recznie resetuje gre, czysci i wyrzuca graczy, gotowe na przyjecie dwoch graczy
 
 Opis:
 
@@ -107,3 +131,17 @@ wysyła ClientHandler (lub GameSession za jego pomocą); odbiera ClientConnectio
 DODATKOWE RZECZY W I2:
 
 boolean stoppedForAgreement i wyniki przechowywane na biezaco w ClientMain/SwingClientMain. Do wykorzystania później w GUI.
+
+NOWE RZECZY W I3:
+
+dodanie zapisu do bazy danych (h2),
+
+dodanie clear() do klasy Board,
+
+implementacja bota-gracza,
+
+możliwość rozgrywania wielu gier z rzędu,
+
+przeniesienie logiki akceptowania połączenia od gracza z ServerMain do Gamesession (public synchronized void tryAddPlayer(Socket socket)), jak jest za dużo graczy do socket.close(),
+
+mozliwość konsolowej obsługi serwera (komedny: exit, replay <ID>, bot, reset)

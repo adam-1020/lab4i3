@@ -1,49 +1,108 @@
 package lab4.server;
 
+import lab4.database.GameRepository;
+import lab4.database.MoveRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.autoconfigure.domain.EntityScan;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.net.ServerSocket;
 import java.net.Socket;
 
 /**
- * Server: accepts exactly two clients, registers them in GameSession and starts the game.
+ * Server: listens for connections and delegates them to GameSession.
+ * Uruchamiany przez Spring Boot.
  */
-public class ServerMain
+@SpringBootApplication
+@ComponentScan(basePackages = "lab4")
+@EntityScan(basePackages = "lab4.database")
+@EnableJpaRepositories(basePackages = "lab4.database") // Java Persistence API
+//CommandLineRunner W Spring Boot oznacza, że kod w metodzie run() uruchomi się automatycznie po starcie aplikacji
+public class ServerMain implements CommandLineRunner
 {
+    @Autowired
+    private GameRepository gameRepository;
+    @Autowired
+    private MoveRepository moveRepository;
+
     public static void main(String[] args)
     {
+        SpringApplication.run(ServerMain.class, args);
+    }
+
+    @Override
+    public void run(String... args) throws Exception {
         final int port = 55555;
         final int boardSize = 19; //tu bedzie mozna zmienic rozmiar planszy
 
         System.out.println("Server starting on port " + port + " (board " + boardSize + "x" + boardSize + ")");
 
-        try (ServerSocket serverSocket = new ServerSocket(port))
-        {
+        // Inicjalizacja Singletona z repozytoriami
+        GameSession session = GameSession.getInstance(boardSize);
+        session.setRepositories(gameRepository, moveRepository);
 
-            // Prepare SINGLETON session
-            GameSession.getInstance(boardSize);
-
-            int connected = 0;
-            ClientHandler[] handlers = new ClientHandler[2]; //tablica z dwoma handlerami dla playerow; do komunikacji z klientem
-
-            while (connected < 2)
+        // Osobny wątek do nasłuchiwania graczy w pętli nieskończonej
+        new Thread(() -> {
+            try (ServerSocket serverSocket = new ServerSocket(port))
             {
-                Socket client = serverSocket.accept(); // serverSocket.accept() blokuje wątek, aż klient się połączy
-                connected++;
-                System.out.println("Client connected - assign playerId=" + connected);
-                ClientHandler handler = new ClientHandler(client, connected); // tworzymy clientHandler podajac do konstruktora socket ktory zaakceptowalismy wlasnie
-                handlers[connected-1] = handler;
-                GameSession.getInstance().register(handler); //Rejestruje handler w sesji gry, żeby gra wiedziała o wszystkich graczach
-                new Thread(handler, "ClientHandler-" + connected).start(); //Tworzy nowy wątek dla klienta, żeby obsługa komunikacji była równoległa
+                System.out.println("Waiting for players...");
+
+                while (true) // Petla nieskonczona - serwer dziala caly czas
+                {
+                    try {
+                        Socket client = serverSocket.accept();
+                        // Delegujemy dodanie gracza do GameSession
+                        // To GameSession decyduje czy przyjąć (czy jest miejsce) i kiedy zacząć grę.
+                        // zmieniam to dlatego, zeby moc obslugiwac wiele gier z rzedu !!!!
+                        GameSession.getInstance().tryAddPlayer(client);
+                    } catch (IOException e) {
+                        System.err.println("Accept failed: " + e.getMessage());
+                    }
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
             }
+        }).start();
 
-            System.out.println("Two players connected. Starting game.");
-            GameSession.getInstance().startGame();
+        // Menu konsolowe serwera
+        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+        System.out.println("=== SERVER CONSOLE ===");
+        System.out.println("Commands:");
+        System.out.println("  bot       -> Add a bot player");
+        System.out.println("  replay ID -> Replay game with ID");
+        System.out.println("  reset     -> Force reset session");
+        System.out.println("  exit      -> Stop server");
 
-            // keep server alive (ale tylko dopoki nie jest gameOver)
-            while (GameSession.getInstance().isRunning()) Thread.sleep(1000);
+        while (true) {
+            String line = reader.readLine();
+            if (line == null) break;
 
-        } catch (IOException | InterruptedException e) {
-            e.printStackTrace();
+            String cmd = line.trim();
+            if (cmd.equalsIgnoreCase("exit")) {
+                System.exit(0);
+            }
+            else if (cmd.equalsIgnoreCase("bot")) {
+                System.out.println("Starting bot...");
+                new Thread(new SimpleBot()).start();
+            }
+            else if (cmd.equalsIgnoreCase("reset")) {
+                GameSession.getInstance().reset();
+            }
+            else if (cmd.toLowerCase().startsWith("replay ")) {
+                try {
+                    long id = Long.parseLong(cmd.split(" ")[1]);
+                    GameSession.getInstance().replayGameFromDb(id);
+                } catch (Exception e) {
+                    System.out.println("Invalid replay format. Use: replay <ID>");
+                }
+            }
         }
     }
 }

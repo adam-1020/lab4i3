@@ -1,25 +1,36 @@
 package lab4.server;
 
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
 
 import lab4.common.Board;
 import lab4.common.JsonUtil;
 import lab4.common.Move;
+import lab4.database.GameEntity;
+import lab4.database.GameRepository;
+import lab4.database.MoveEntity;
+import lab4.database.MoveRepository;
 
 /**
  * Singleton: jedna sesja gry.
- *
- * Wzorce:
- * - Singleton: GameSession.getInstance()
- * - Observer (prymitywny): trzymamy listę ClientHandler i broadcastujemy
- * - DTO (data transfer object): Board i Move są przesyłane/serializowane przez JsonUtil
+ * Zarządza stanem gry, graczami i zapisem do bazy.
  */
 public class GameSession
 {
     // konstruktor tego jest prywatny, uzywajac getinstance wstawiamy instancje w pole static, a:
     /** Singleton instance */
     private static GameSession instance = null; //static nalezy do klasy, ale nie do instancji.
+
+    // Repozytoria Springowe
+    private GameRepository gameRepository;
+    private MoveRepository moveRepository;
+
+    // Obiekt gry w bazie danych
+    private GameEntity currentGameEntity;
+    private int moveCounter = 0;
 
     // utwórz lub pobierz instancję (wywołujemy z ServerMain przy starcie)
      /**
@@ -32,6 +43,11 @@ public class GameSession
     {
         if (instance == null) instance = new GameSession(boardSize);
         return instance;
+    }
+
+    public void setRepositories(GameRepository gr, MoveRepository mr) {
+        this.gameRepository = gr;
+        this.moveRepository = mr;
     }
 
     // pobierz istniejącą instancję (np. z handlerów)
@@ -78,12 +94,39 @@ public class GameSession
     }
 
     /**
-     * Returns true if the game is still running.
-     *
-     * @return true if game not over
+     * Metoda wywoływana przez ServerMain w pętli.
+     * Próbuje dodać gracza do sesji. Jeśli jest miejsce -> tworzy handler i wątek.
      */
-    public synchronized boolean isRunning(){ // do petli servermain, zeby wiedziec jak dlugo podtrzymywac
-        return !gameOver;
+    public synchronized void tryAddPlayer(Socket socket) {
+        // Jeśli jest już 2 graczy, odrzucamy połączenie
+        if (observers.size() >= 2) {
+            try {
+                PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+                out.println("ERROR Server full (game in progress). Try again later.");
+                socket.close();
+            } catch (IOException e) {
+                System.err.println("Error rejecting client: " + e.getMessage());
+            }
+            return;
+        }
+
+        // Przydzielamy ID: 1 jeśli lista pusta, 2 jeśli jest już jeden
+        int newId = observers.size() + 1;
+
+        try {
+            ClientHandler handler = new ClientHandler(socket, newId);
+            register(handler);
+            new Thread(handler).start();
+            System.out.println("Player joined with ID: " + newId);
+
+            // Jeśli po dodaniu mamy 2 graczy -> START GRY
+            if (observers.size() == 2) {
+                System.out.println("Two players present. Starting game...");
+                startGame();
+            }
+        } catch (IOException e) {
+            System.err.println("Failed to create ClientHandler: " + e.getMessage());
+        }
     }
 
     /**
@@ -112,12 +155,32 @@ public class GameSession
             System.out.println("Need exactly 2 players to start game");
             return;
         }
+
+        // 1. Zapis nowej gry w bazie
+        if (gameRepository != null) {
+            currentGameEntity = new GameEntity();
+            currentGameEntity.setResult("In Progress");
+            currentGameEntity = gameRepository.save(currentGameEntity);
+            moveCounter = 0;
+            System.out.println("Game will be saved to DB with ID: " + currentGameEntity.getId());
+        }
+
+        // 2. Czyszczenie planszy (WAŻNE, bo po porzedniej grze cos moglo zostac)
+        board.clear();
+
+        // 3. Reset flags
         started = true;
         gameOver = false;
         currentPlayer = 1;
         consecutivePasses = 0;
+        stoppedForAgreement = false;
+        ONEvotedForFinish = false;
+        TWOvotedForFinish = false;
         previousBoard = null;
+        wyniki[0] = 0;
+        wyniki[1] = 0;
 
+        // 4. Powiadomienie graczy
         for (ClientHandler h : observers) h.sendLine("START " + h.getPlayerId());
         broadcastBoard();
         notifyTurn();
@@ -180,6 +243,11 @@ public class GameSession
         // move accepted: set previousBoard = before (position before this move)
         previousBoard = before;
 
+        // Zapis ruchu do bazy
+        if (moveRepository != null && currentGameEntity != null) {
+            MoveEntity me = new MoveEntity(++moveCounter, m.row, m.col, m.player, currentGameEntity);
+            moveRepository.save(me);
+        }
         // reset consecutive passes
         consecutivePasses = 0;
 
@@ -270,6 +338,10 @@ public class GameSession
     else if (ch.getPlayerId() == 2){TWOvotedForFinish = true; broadcastInfo("Player 2 voted FINISH");}
     if(ONEvotedForFinish && TWOvotedForFinish) {
         gameOver = true;
+            if (currentGameEntity != null && gameRepository != null) {
+                currentGameEntity.setResult("Finished by agreement");
+                gameRepository.save(currentGameEntity);
+            }
         for (ClientHandler h : observers) h.sendLine("GAME_OVER You both agreed. Thanks for game:)"); //konczy gre
     }
     }
@@ -285,6 +357,12 @@ public class GameSession
         if (gameOver) { ch.sendLine("ERROR Game already finished"); return; }
         int winner = (ch.getPlayerId() == 1 ? 2 : 1);
         gameOver = true;
+
+        if (currentGameEntity != null && gameRepository != null) {
+            currentGameEntity.setResult("Player " + ch.getPlayerId() + " resigned");
+            gameRepository.save(currentGameEntity);
+        }
+
         broadcastInfo("Player " + ch.getPlayerId() + " resigned. Player " + winner + " wins.");
         for (ClientHandler h : observers) h.sendLine("GAME_OVER Player " + winner + " wins (resign)");
     }
@@ -298,7 +376,7 @@ public class GameSession
     public synchronized void clientDisconnected(ClientHandler ch)
     {
         observers.remove(ch);
-        if (!gameOver)
+        if (started && !gameOver)
         {
             gameOver = true;
             for (ClientHandler o : observers)
@@ -306,6 +384,91 @@ public class GameSession
                 o.sendLine("ERROR Opponent disconnected. Game ended.");
                 o.sendLine("GAME_OVER Opponent disconnected");
             }
+            // Zapisz w bazie, ze przerwano
+            if (currentGameEntity != null && gameRepository != null) {
+                currentGameEntity.setResult("Aborted (Disconnect)");
+                gameRepository.save(currentGameEntity);
+            }
         }
+
+        // Jeśli nikt nie został, resetujemy sesję dla nowych graczy
+        if (observers.isEmpty()) {
+            System.out.println("All players disconnected. Resetting session automatically.");
+            reset();
+        }
+    }
+
+    /**
+     * Resets the session state so a new game can be played without restarting server.
+     */
+    public synchronized void reset() {
+        // Powiadamiamy i usuwamy resztki graczy (jeśli reset wywołany ręcznie)
+        for (ClientHandler h : observers) {
+            try {h.sendLine("GAME_OVER Session reset by admin. Disconnecting.");} catch (Exception ignored) {}
+        }
+        observers.clear();
+
+        // Czyszczenie planszy
+        board.clear();
+
+        this.previousBoard = null;
+        this.started = false;
+        this.gameOver = false;
+        this.currentPlayer = 1;
+        this.consecutivePasses = 0;
+        this.stoppedForAgreement = false;
+        this.ONEvotedForFinish = false;
+        this.TWOvotedForFinish = false;
+        this.wyniki[0] = 0;
+        this.wyniki[1] = 0;
+
+        this.currentGameEntity = null;
+        this.moveCounter = 0;
+
+        System.out.println("Game Session has been reset. Ready for new players.");
+    }
+
+    /**
+     * Odtwarza gre z bazy danych.
+     */
+    public synchronized void replayGameFromDb(Long gameId) {
+        if(started){
+            System.out.println("Game in progress! Use 'reset' first.");
+            return;
+        }
+        if(observers.isEmpty()){
+            System.out.println("No players connected, cant show replay");
+            return;
+        }
+        if (gameRepository == null) {
+            System.out.println("DB not initialized");
+            return;
+        }
+        GameEntity game = gameRepository.findById(gameId).orElse(null);
+        if (game == null) {
+            broadcastInfo("Game with ID " + gameId + " not found.");
+            return;
+        }
+
+        broadcastInfo("REPLAYING GAME ID: " + gameId);
+
+        // Czyścimy planszę przed odtwarzaniem
+        board.clear();
+        broadcastBoard();
+
+        List<MoveEntity> moves = game.getMoves();
+        for (MoveEntity me : moves) {
+            try {
+                // Opoznienie dla efektu wizualnego
+                Thread.sleep(800);
+            } catch (InterruptedException ignored) {}
+
+            board.applyMoveAndCapture(me.getRowInd(), me.getColInd(), me.getPlayerId());
+            broadcastBoard();
+            broadcastInfo("Replay move: Player " + me.getPlayerId() + " at " + me.getRowInd() + "," + me.getColInd());
+        }
+        broadcastInfo("REPLAY FINISHED. Result: " + game.getResult());
+
+        //zeby teraz zagrac wystarczy ze dolaczy drugi gracz
     }
 }
